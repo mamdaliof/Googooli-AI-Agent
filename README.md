@@ -2,7 +2,7 @@
 
 Welcome to the **Googooli Assistant** open-source code package. Googooli is a personalized AI developer assistant, research proctor, and learning tutor designed to help index, tutor, and search notes, software projects, and papers. 
 
-This hub consolidates the three implementation variants of Googooli so that you and your friends can test them, provide feedback, and deploy them under different environments.
+This hub consolidates the three implementation variants of the Googooli Assistant, providing a streamlined structure for configuration, diagnostics, and deployment across different target environments.
 
 ---
 
@@ -114,7 +114,7 @@ Before publishing this repository to open source, you can customize the code dir
 
 ## 🤖 Working with AI Coding Agents (Claude Code, Cursor, Windsurf, Codex)
 
-If you or your friends prefer to develop or customize the Googooli Assistant using AI coding agents:
+If developers prefer to customize or extend the Googooli Assistant using AI coding agents:
 1. **Workspace Instruction file**: The workspace contains a root [AGENTS.md](file:///home/farhad/googooli-assistant/AGENTS.md) file.
 2. **Automatic Bootstrap**: Modern coding assistants (like Claude Code, Cursor, Windsurf, and Codex) are configured to read [AGENTS.md](file:///home/farhad/googooli-assistant/AGENTS.md) automatically upon opening the workspace directory. The file instructs them on how to initialize the environments, run diagnostics, and implement new custom tools.
 3. **Running the Agent**:
