@@ -8,11 +8,11 @@ This hub consolidates the three implementation variants of the Googooli Assistan
 
 ## 📂 Project Directory Structure
 
-* **`config/`**: Contains global templates, including [`.env.example`](file:///home/farhad/googooli-assistant/config/.env.example) with all configuration variables.
+* **`config/`**: Contains global templates, including [`.env.example`](config/.env.example) with all configuration variables.
 * **`implementations/`**: Contains the source codes for the three variants:
-  * [`obsidian-agy/`](file:///home/farhad/googooli-assistant/implementations/obsidian-agy/): The core Obsidian Vault gateway. Uses the Google Antigravity (`agy`) tool to interact directly with the vault.
-  * [`openclaw/`](file:///home/farhad/googooli-assistant/implementations/openclaw/): A pure Python agent using Nvidia NIM for chat and system shell tools.
-  * [`free-claude/`](file:///home/farhad/googooli-assistant/implementations/free-claude/): A FastAPI proxy that runs the Anthropic `claude` CLI (Claude Code) on top of Nvidia NIM, Google Gemini, or DeepSeek for free.
+  * [`obsidian-agy/`](implementations/obsidian-agy/): The core Obsidian Vault gateway. Uses the Google Antigravity (`agy`) tool to interact directly with the vault.
+  * [`openclaw/`](implementations/openclaw/): A pure Python agent using Nvidia NIM for chat and system shell tools.
+  * [`free-claude/`](implementations/free-claude/): A FastAPI proxy that runs the Anthropic `claude` CLI (Claude Code) on top of Nvidia NIM, Google Gemini, or DeepSeek for free.
 
 ---
 
@@ -38,7 +38,7 @@ To make setup as easy as possible, use our interactive launcher wizard:
 
 1. **Navigate to the directory**:
    ```bash
-   cd /home/farhad/googooli-assistant
+   cd googooli-assistant
    ```
 2. **Run the Setup & Launcher wizard**:
    ```bash
@@ -106,17 +106,17 @@ Acts as a local proxy. When you run `claude` (Claude Code CLI) or connect VS Cod
 
 ## 🛠️ Modifications & Customizations
 Before publishing this repository to open source, you can customize the code directly:
-- To modify the **Obsidian bot behaviors**, edit: [`implementations/obsidian-agy/.googooli/scripts/telegram_gateway.py`](file:///home/farhad/googooli-assistant/implementations/obsidian-agy/.googooli/scripts/telegram_gateway.py).
-- To add or modify **OpenClaw tools**, edit: [`implementations/openclaw/src/tools.py`](file:///home/farhad/googooli-assistant/implementations/openclaw/src/tools.py).
-- To adjust the **Free Claude proxy mapping**, edit: [`implementations/free-claude/api/app.py`](file:///home/farhad/googooli-assistant/implementations/free-claude/api/app.py).
+- To modify the **Obsidian bot behaviors**, edit: [`implementations/obsidian-agy/.googooli/scripts/telegram_gateway.py`](implementations/obsidian-agy/.googooli/scripts/telegram_gateway.py).
+- To add or modify **OpenClaw tools**, edit: [`implementations/openclaw/src/tools.py`](implementations/openclaw/src/tools.py).
+- To adjust the **Free Claude proxy mapping**, edit: [`implementations/free-claude/api/app.py`](implementations/free-claude/api/app.py).
 
 ---
 
 ## 🤖 Working with AI Coding Agents (Claude Code, Cursor, Windsurf, Codex)
 
 If developers prefer to customize or extend the Googooli Assistant using AI coding agents:
-1. **Workspace Instruction file**: The workspace contains a root [AGENTS.md](file:///home/farhad/googooli-assistant/AGENTS.md) file.
-2. **Automatic Bootstrap**: Modern coding assistants (like Claude Code, Cursor, Windsurf, and Codex) are configured to read [AGENTS.md](file:///home/farhad/googooli-assistant/AGENTS.md) automatically upon opening the workspace directory. The file instructs them on how to initialize the environments, run diagnostics, and implement new custom tools.
+1. **Workspace Instruction file**: The workspace contains a root [AGENTS.md](AGENTS.md) file.
+2. **Automatic Bootstrap**: Modern coding assistants (like Claude Code, Cursor, Windsurf, and Codex) are configured to read [AGENTS.md](AGENTS.md) automatically upon opening the workspace directory. The file instructs them on how to initialize the environments, run diagnostics, and implement new custom tools.
 3. **Running the Agent**:
    * **Cursor/Windsurf**: Open this folder in the editor. You can use the composer or chat and reference `@AGENTS.md` for context.
    * **Claude Code**: Simply run `claude` inside the folder. It will read `AGENTS.md` (or `CLAUDE.md` which symlinks to it) and follow the conventions.

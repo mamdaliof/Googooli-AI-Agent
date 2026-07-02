@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/mamdaliof/Documents/GitHub/mamdaliof-obsidian
-ExecStart=/usr/bin/bash /home/mamdaliof/Documents/GitHub/mamdaliof-obsidian/.googooli/scripts/run_gateway.sh
+WorkingDirectory=/path/to/your/obsidian-vault
+ExecStart=/usr/bin/bash /path/to/your/obsidian-vault/.googooli/scripts/run_gateway.sh
 Restart=on-failure
 RestartSec=10
 

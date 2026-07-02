@@ -130,27 +130,27 @@ The Conductor framework maintains the following active development tracks for Go
 To simplify agent tool invocations, optimize context windows, and prevent errors, several utility scripts are registered in `.googooli/scripts/`:
 
 ### A. Inbox Scanner (`inbox_scanner.py`)
-* **Path**: [inbox_scanner.py](file:///home/mamdaliof/Documents/GitHub/mamdaliof-obsidian/.googooli/scripts/inbox_scanner.py)
+* **Path**: [inbox_scanner.py](.googooli/scripts/inbox_scanner.py)
 * **Usage**: `python3 .googooli/scripts/inbox_scanner.py`
 * **Purpose**: Scans `00-Inbox/` and groups subdirectories/files into discrete JSON task items to be processed by isolated sub-agents.
 
 ### B. Image Relocation & Rewriter (`image_rewriter.py`)
-* **Path**: [image_rewriter.py](file:///home/mamdaliof/Documents/GitHub/mamdaliof-obsidian/.googooli/scripts/image_rewriter.py)
+* **Path**: [image_rewriter.py](.googooli/scripts/image_rewriter.py)
 * **Usage**: `python3 .googooli/scripts/image_rewriter.py <note_path> [source_inbox_dir]`
 * **Purpose**: Parses markdown files for local image links, copies the source files into a local `attachments/` folder relative to the note's final location, and rewrites the image links inside the markdown file to point to the new location.
 
 ### C. Map of Content Linker (`moc_linker.py`)
-* **Path**: [moc_linker.py](file:///home/mamdaliof/Documents/GitHub/mamdaliof-obsidian/.googooli/scripts/moc_linker.py)
+* **Path**: [moc_linker.py](.googooli/scripts/moc_linker.py)
 * **Usage**: `python3 .googooli/scripts/moc_linker.py <moc_path> <note_path> <category_heading> [note_title]`
 * **Purpose**: Automatically appends a link to a newly created note under a specified section/heading in a parent Map of Content (MOC) index file.
 
 ### D. Spaced Repetition Flashcard Formatter (`flashcard_formatter.py`)
-* **Path**: [flashcard_formatter.py](file:///home/mamdaliof/Documents/GitHub/mamdaliof-obsidian/.googooli/scripts/flashcard_formatter.py)
+* **Path**: [flashcard_formatter.py](.googooli/scripts/flashcard_formatter.py)
 * **Usage**: `python3 .googooli/scripts/flashcard_formatter.py <note_path>`
 * **Purpose**: Scans a note for bullet-list Q&A entries and reformats them into double-colon (`::`) syntax cards for the Obsidian Spaced Repetition plugin.
 
 ### E. Project Context Loader (`project_context_loader.py`)
-* **Path**: [project_context_loader.py](file:///home/mamdaliof/Documents/GitHub/mamdaliof-obsidian/.googooli/scripts/project_context_loader.py)
+* **Path**: [project_context_loader.py](.googooli/scripts/project_context_loader.py)
 * **Usage**: `python3 .googooli/scripts/project_context_loader.py <project_name> [max_log_entries]`
 * **Purpose**: Completely reads a project's `_overview.md` and extracts only the last N entries of `_dev-log.md` to feed core context to the developer agent without bloating the context window.
 

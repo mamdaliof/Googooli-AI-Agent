@@ -35,7 +35,7 @@ Configure the Telegram bot daemon for production server usage and set up correct
   - Use `/usr/bin/python3` explicitly to bypass Conda active environments.
 - [ ] **Create Systemd Service**:
   - Write `googooli.service` in `~/.config/systemd/user/`.
-  - Point working directory to `/home/mamdaliof/Documents/GitHub/mamdaliof-obsidian`.
+  - Point working directory to your local Obsidian vault root folder.
 - [ ] **Implement Environment Control**:
   - Modify `telegram_gateway.py` or startup scripts to inspect the hostname.
   - On personal PC (`mamdaliof`), prevent systemd auto-start (keep service stopped/disabled by default).

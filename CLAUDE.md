@@ -1,6 +1,6 @@
 # Claude Code Instructions (CLAUDE.md)
 
-Refer to [AGENTS.md](file:///home/farhad/googooli-assistant/AGENTS.md) for full details on project architecture, environment setup, diagnostics commands, and custom tool mapping.
+Refer to [AGENTS.md](AGENTS.md) for full details on project architecture, environment setup, diagnostics commands, and custom tool mapping.
 
 ---
 
