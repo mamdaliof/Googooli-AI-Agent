@@ -1,0 +1,33 @@
+# Virtual Environments
+venv/
+.venv/
+*/venv/
+*/.venv/
+
+# Environment configurations and Secrets
+.env
+.env.*
+*/.env
+*/.env.*
+
+# Python Cache and Build Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Database files
+*.db
+*.sqlite3
+
+# Log files
+*.log
+logs/
+
+# OS specific files
+.DS_Store
+Thumbs.db

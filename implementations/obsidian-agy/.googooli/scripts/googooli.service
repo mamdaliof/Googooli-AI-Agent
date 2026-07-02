@@ -1,0 +1,13 @@
+[Unit]
+Description=Googooli Telegram Gateway
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mamdaliof/Documents/GitHub/mamdaliof-obsidian
+ExecStart=/usr/bin/bash /home/mamdaliof/Documents/GitHub/mamdaliof-obsidian/.googooli/scripts/run_gateway.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

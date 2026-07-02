@@ -1,0 +1,16 @@
+{
+  "device_id": "ubuntu-s-1vcpu-2gb-nyc1-01",
+  "modes": {
+    "server": {
+      "telegram_enabled": true,
+      "approval_mode": "yolo",
+      "auto_sync": true
+    },
+    "personal_pc": {
+      "telegram_enabled": false,
+      "approval_mode": "auto_edit",
+      "auto_sync": true
+    }
+  },
+  "git_sync_interval_seconds": 60
+}

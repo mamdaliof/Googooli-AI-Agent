@@ -1,0 +1,37 @@
+{
+  "suggestions_limit": 5,
+  "randomness_factor": 0.2,
+  "metrics": [
+    "recency",
+    "citation_count",
+    "github_stars",
+    "keyword_relevance",
+    "hacker_news_score",
+    "tutorial_completeness",
+    "vault_backlink_density",
+    "conference_prestige",
+    "huggingface_trending",
+    "open_access_status"
+  ],
+  "conferences": [
+    "CVPR",
+    "ICLR",
+    "ICCV",
+    "ICRA",
+    "IROS",
+    "CASE"
+  ],
+  "favorite_media": [
+    "arXiv",
+    "HuggingFace",
+    "Twitter",
+    "YouTube"
+  ],
+  "fields_of_interest": [
+    "computer vision",
+    "AI",
+    "deep learning",
+    "robotics"
+  ],
+  "ignore_non_open_access": false
+}
