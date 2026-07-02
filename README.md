@@ -109,3 +109,15 @@ Before publishing this repository to open source, you can customize the code dir
 - To modify the **Obsidian bot behaviors**, edit: [`implementations/obsidian-agy/.googooli/scripts/telegram_gateway.py`](file:///home/farhad/googooli-assistant/implementations/obsidian-agy/.googooli/scripts/telegram_gateway.py).
 - To add or modify **OpenClaw tools**, edit: [`implementations/openclaw/src/tools.py`](file:///home/farhad/googooli-assistant/implementations/openclaw/src/tools.py).
 - To adjust the **Free Claude proxy mapping**, edit: [`implementations/free-claude/api/app.py`](file:///home/farhad/googooli-assistant/implementations/free-claude/api/app.py).
+
+---
+
+## 🤖 Working with AI Coding Agents (Claude Code, Cursor, Windsurf, Codex)
+
+If you or your friends prefer to develop or customize the Googooli Assistant using AI coding agents:
+1. **Workspace Instruction file**: The workspace contains a root [AGENTS.md](file:///home/farhad/googooli-assistant/AGENTS.md) file.
+2. **Automatic Bootstrap**: Modern coding assistants (like Claude Code, Cursor, Windsurf, and Codex) are configured to read [AGENTS.md](file:///home/farhad/googooli-assistant/AGENTS.md) automatically upon opening the workspace directory. The file instructs them on how to initialize the environments, run diagnostics, and implement new custom tools.
+3. **Running the Agent**:
+   * **Cursor/Windsurf**: Open this folder in the editor. You can use the composer or chat and reference `@AGENTS.md` for context.
+   * **Claude Code**: Simply run `claude` inside the folder. It will read `AGENTS.md` (or `CLAUDE.md` which symlinks to it) and follow the conventions.
+
