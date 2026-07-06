@@ -623,6 +623,41 @@ def callback_research_selection(call):
     except Exception as e:
         bot.answer_callback_query(call.id, f"Error: {str(e)}")
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("guided_"))
+def callback_guided_research(call):
+    if call.from_user.id != ALLOWED_USER_ID: return
+    action, project_name = call.data.split(":", 1)
+    
+    import sqlite3
+    import threading
+    db_path = os.path.join(BASE_DIR, "data/research_state.db")
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        if action == "guided_proceed":
+            cursor.execute("UPDATE guided_research SET status = 'running' WHERE project_name = ?", (project_name,))
+            conn.commit()
+            conn.close()
+            
+            bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
+            bot.send_message(call.message.chat.id, f"🚀 Resuming research for: <b>{project_name}</b>...", parse_mode="HTML")
+            
+            # Import dynamically to avoid circular import issues
+            from research_assistant import run_project_research
+            threading.Thread(target=run_project_research, args=(project_name,)).start()
+            
+        elif action == "guided_pause":
+            cursor.execute("UPDATE guided_research SET status = 'idle' WHERE project_name = ?", (project_name,))
+            conn.commit()
+            conn.close()
+            
+            bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
+            bot.send_message(call.message.chat.id, f"⏸️ Research paused for: <b>{project_name}</b>. Edit <code>research_brief.md</code> and reply/proceed to resume.", parse_mode="HTML")
+            
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"Error: {str(e)}")
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("interests_"))
 def callback_interests_selection(call):
     if call.from_user.id != ALLOWED_USER_ID: return
@@ -874,16 +909,21 @@ def handle_file(message):
 def handle_reply_notes(message):
     replied_msg = message.reply_to_message
     text = replied_msg.text or replied_msg.caption or ""
-    # Find sug_id from text (hidden comment <!-- ID: \d+ --> or visible ID: \d+)
+    # Check for paper suggestion ID
     sug_id_match = re.search(r'ID:\s*(\d+)', text)
     if not sug_id_match:
         sug_id_match = re.search(r'<!-- ID:\s*(\d+) -->', text)
         
+    # Check for guided project name
+    project_match = re.search(r'guided project:\s*([^\n\r]+)', text, re.IGNORECASE)
+    if not project_match:
+        project_match = re.search(r'research for:\s*([^\n\r]+)', text, re.IGNORECASE)
+        
+    db_path = os.path.join(BASE_DIR, "data/research_state.db")
+    
     if sug_id_match:
         sug_id = int(sug_id_match.group(1))
         user_note = message.text.strip()
-        
-        db_path = os.path.join(BASE_DIR, "data/research_state.db")
         try:
             import sqlite3
             conn = sqlite3.connect(db_path)
@@ -895,6 +935,28 @@ def handle_reply_notes(message):
             return
         except Exception as e:
             bot.reply_to(message, f"❌ Failed to save note: {str(e)}")
+            return
+            
+    elif project_match:
+        project_name = project_match.group(1).strip()
+        user_comment = message.text.strip()
+        try:
+            import sqlite3
+            import threading
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE guided_research SET status = 'running' WHERE project_name = ?", (project_name,))
+            conn.commit()
+            conn.close()
+            
+            # Import dynamically to avoid circular dependencies
+            from research_assistant import run_project_research
+            threading.Thread(target=run_project_research, args=(project_name, user_comment)).start()
+            
+            bot.reply_to(message, f"📝 <b>Feedback received for project {project_name}:</b>\n\"{html.escape(user_comment)}\"\n\nResuming research phase...", parse_mode='HTML')
+            return
+        except Exception as e:
+            bot.reply_to(message, f"❌ Failed to resume project research: {str(e)}")
             return
 
 

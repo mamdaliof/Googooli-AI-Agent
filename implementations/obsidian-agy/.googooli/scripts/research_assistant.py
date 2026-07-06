@@ -556,30 +556,81 @@ def check_vault_note_exists(concept):
     return None
 
 
-def analyze_prerequisites(pdf_path, nb_id):
-    """Uploads PDF to NotebookLM, extracts summaries and prerequisites."""
+def analyze_prerequisites(pdf_path, abstract_text, title, nb_id):
+    """Uploads PDF (if < 10MB) or abstract text to NotebookLM, extracts summaries, prerequisites, and relevance score."""
     summary = "Unable to extract summary."
     prereqs = []
-    if not pdf_path or not nb_id:
-        return summary, prereqs
+    relevance_score = 0
+    if not nb_id:
+        return summary, prereqs, relevance_score
 
+    # Check PDF size threshold
+    use_pdf = False
+    if pdf_path and os.path.exists(pdf_path):
+        try:
+            size = os.path.getsize(pdf_path)
+            if size < 10 * 1024 * 1024: # 10 MB
+                use_pdf = True
+            else:
+                print(f"⚠️ PDF too large ({size / (1024*1024):.1f} MB). Falling back to text abstract.")
+        except Exception:
+            pass
+
+    src_id = None
     try:
-        res_add = subprocess.run(["notebooklm", "source", "add", pdf_path, "--notebook", nb_id, "--type", "file", "--json"], capture_output=True, text=True)
-        src_id = json.loads(res_add.stdout).get("id") or json.loads(res_add.stdout).get("source", {}).get("id")
-        if not src_id:
-            return summary, prereqs
+        if use_pdf:
+            res_add = subprocess.run(["notebooklm", "source", "add", pdf_path, "--notebook", nb_id, "--type", "file", "--json"], capture_output=True, text=True)
+            src_id = json.loads(res_add.stdout).get("id") or json.loads(res_add.stdout).get("source", {}).get("id")
+        else:
+            # Fallback: Upload abstract text
+            source_content = f"Title: {title}\nAbstract: {abstract_text}"
+            res_add = subprocess.run(["notebooklm", "source", "add", source_content, "--notebook", nb_id, "--type", "text", "--title", f"Abstract: {title[:50]}", "--json"], capture_output=True, text=True)
+            src_id = json.loads(res_add.stdout).get("id") or json.loads(res_add.stdout).get("source", {}).get("id")
 
+        if not src_id:
+            return summary, prereqs, relevance_score
+
+        # Wait for ingestion
         subprocess.run(["notebooklm", "source", "wait", src_id, "--notebook", nb_id, "--timeout", "300"], capture_output=True)
 
+        # 1. Ask for summary
         summary = run_notebooklm_ask("Provide a clear 2-sentence summary of this paper.", nb_id, use_personality=True)
+        
+        # 2. Ask for prerequisites
         raw_prereqs = run_notebooklm_ask("List 2 to 3 core prerequisite concepts/background topics required to understand this paper. Format as a simple comma-separated list of nouns only (e.g. Graph Neural Networks, Reinforcement Learning).", nb_id, use_personality=False)
         if raw_prereqs:
             prereqs = [p.strip() for p in raw_prereqs.split(",") if p.strip()]
 
+        # 3. Ask for relevance score compared to Farhad's research interests
+        # Let's read the interests file content to prompt NotebookLM
+        interests_text = ""
+        interests_file = os.path.join(VAULT_ROOT, "07-Tools/Googooli-Research-Interests.md")
+        if os.path.exists(interests_file):
+            with open(interests_file, "r") as f:
+                interests_text = f.read()
+
+        relevance_prompt = f"""
+Analyze this paper's content or abstract in the context of Farhad's research interests:
+{interests_text}
+
+Rate the relevance of this paper to his interests on a scale from 1 to 10.
+Your response MUST be just a single integer (e.g., 8). Do NOT include other text.
+"""
+        raw_score = run_notebooklm_ask(relevance_prompt, nb_id, use_personality=False)
+        try:
+            score_match = re.search(r"\b([1-9]|10)\b", raw_score)
+            if score_match:
+                relevance_score = int(score_match.group(0))
+            else:
+                relevance_score = 5
+        except Exception:
+            relevance_score = 5
+
     except Exception as e:
         print(f"⚠️ NotebookLM analysis failed: {e}")
 
-    return summary, prereqs
+    return summary, prereqs, relevance_score
+
 
 
 def evaluate_candidates(candidates, conferences, cursor=None, limit=None, chosen_urls=None):
@@ -741,21 +792,410 @@ def evaluate_candidates(candidates, conferences, cursor=None, limit=None, chosen
     return selected_set[:limit]
 
 
+def fetch_huggingface_daily_papers(keywords):
+    """Fetches trending papers from Hugging Face Daily Papers API and filters by keywords."""
+    print("📡 Fetching Hugging Face daily papers...")
+    import requests
+    papers = []
+    try:
+        res = requests.get("https://huggingface.co/api/daily_papers", timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            for item in data:
+                paper_details = item
+                if "paper" in item:
+                    paper_details = item["paper"]
+                
+                title = paper_details.get("title", "")
+                summary = paper_details.get("summary", "") or paper_details.get("ai_summary", "") or ""
+                paper_id = paper_details.get("id", "")
+                url = f"https://arxiv.org/abs/{paper_id}" if paper_id else f"https://huggingface.co/papers/{item.get('id', '')}"
+                
+                text_to_match = (title + " " + summary).lower()
+                matched_kws = [kw for kw in keywords if kw.lower() in text_to_match]
+                
+                if matched_kws:
+                    score = len(matched_kws) * 1.5
+                    papers.append({
+                        "title": title,
+                        "url": url,
+                        "source": "Hugging Face Daily",
+                        "abstract": summary,
+                        "snippet": summary[:200],
+                        "metric": "HF Keyword Match",
+                        "final_score": score + 5.0,
+                        "venue": "Hugging Face"
+                    })
+    except Exception as e:
+        print(f"⚠️ Failed to fetch Hugging Face daily papers: {e}")
+    return papers
+
+
+def fetch_cvf_conference_papers(keywords, conferences):
+    """Retrieves papers from CVPR/ICCV via targeted searches."""
+    print("📡 Fetching CVPR/ICCV conference papers...")
+    papers = []
+    
+    selected_confs = [c for c in conferences if c.upper() in ["CVPR", "ICCV"]]
+    if not selected_confs:
+        selected_confs = ["CVPR", "ICCV"]
+        
+    tav_key = os.getenv("TAVILY_API_KEY")
+    if tav_key:
+        try:
+            from tavily import TavilyClient
+            tav_client = TavilyClient(api_key=tav_key)
+            
+            for conf in selected_confs:
+                sample_kws = random.sample(keywords, min(2, len(keywords))) if keywords else ["computer vision"]
+                for kw in sample_kws:
+                    query = f"site:openaccess.thecvf.com {conf} {kw} recent papers"
+                    try:
+                        res = tav_client.search(query, max_results=3)
+                        for r in res.get("results", []):
+                            title = r.get("title", "")
+                            url = r.get("url", "")
+                            content = r.get("content", "")
+                            
+                            if "openaccess.thecvf.com" not in url:
+                               continue
+                               
+                            papers.append({
+                                "title": title,
+                                "url": url,
+                                "source": f"{conf} Proceedings",
+                                "abstract": content,
+                                "snippet": content[:200],
+                                "metric": f"{conf} Search Highlight",
+                                "final_score": 8.0,
+                                "venue": conf
+                            })
+                    except Exception as e:
+                        print(f"⚠️ Failed to query CVF papers via Tavily for {conf}/{kw}: {e}")
+        except Exception as e:
+            print(f"⚠️ Tavily client initialization failed: {e}")
+            
+    # Fallback to Google Scholar, arXiv, and PaperCash searches if papers list is empty or Tavily key is missing
+    if not papers:
+        print("📡 Tavily missing/empty, running fallback CVPR/ICCV search via Google Scholar/arXiv/PaperCash...")
+        for conf in selected_confs:
+            sample_kws = random.sample(keywords, min(2, len(keywords))) if keywords else ["computer vision"]
+            for kw in sample_kws:
+                query = f"{conf} {kw}"
+                try:
+                    candidates = run_google_scholar_search(query) + run_last30days_search(query) + run_papercash_search(query)
+                    for c in candidates:
+                        title = c.get("title", "")
+                        url = c.get("url", "")
+                        abstract = c.get("abstract") or c.get("snippet") or ""
+                        venue = c.get("venue") or ""
+                        if (conf.upper() in title.upper() or 
+                            conf.upper() in abstract.upper() or 
+                            conf.upper() in venue.upper() or 
+                            "openaccess.thecvf.com" in url):
+                            
+                            papers.append({
+                                "title": title,
+                                "url": url,
+                                "source": f"{conf} Highlight",
+                                "abstract": abstract,
+                                "snippet": abstract[:200] if abstract else "No abstract available.",
+                                "metric": f"{conf} Fallback Search",
+                                "final_score": 7.0,
+                                "venue": conf
+                            })
+                except Exception as e:
+                    print(f"⚠️ Fallback search failed for {conf}/{kw}: {e}")
+                    
+    return papers
+
+
+def run_daily_highlights(keywords, conferences):
+    """Fetches, scores, selects and sends 3 daily Highlights from Conferences and HuggingFace."""
+    print("🔥 Running daily Highlights selection...")
+    hf_papers = fetch_huggingface_daily_papers(keywords)
+    cvf_papers = fetch_cvf_conference_papers(keywords, conferences)
+    
+    seen_urls = set()
+    unique_hf = []
+    for p in hf_papers:
+        if p["url"] not in seen_urls:
+            seen_urls.add(p["url"])
+            unique_hf.append(p)
+            
+    unique_cvf = []
+    for p in cvf_papers:
+        if p["url"] not in seen_urls:
+            seen_urls.add(p["url"])
+            unique_cvf.append(p)
+            
+    unique_hf = sorted(unique_hf, key=lambda x: x.get("final_score", 0), reverse=True)
+    unique_cvf = sorted(unique_cvf, key=lambda x: x.get("final_score", 0), reverse=True)
+    
+    selected = []
+    selected.extend(unique_cvf[:2])
+    selected.extend(unique_hf[:1])
+    
+    remaining = 3 - len(selected)
+    if remaining > 0:
+        selected.extend(unique_hf[len(selected)-len(unique_cvf[:2]):][:remaining])
+    remaining = 3 - len(selected)
+    if remaining > 0:
+        selected.extend(unique_cvf[len(selected)-len(unique_hf[:1]):][:remaining])
+        
+    selected = selected[:3]
+    if not selected:
+        print("⚠️ No Highlights selected.")
+        return
+        
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    today = get_netherlands_time().strftime("%Y-%m-%d")
+    
+    saved_highlights = []
+    for p in selected:
+        title = p["title"]
+        url = p["url"]
+        source = p["source"]
+        summary = p["abstract"] or "No abstract available."
+        metric = p["metric"]
+        
+        try:
+            cursor.execute("""
+            INSERT INTO suggestions (title, url, source, description, prerequisites, metric, created_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (title, url, source, summary, json.dumps([]), metric, today))
+            conn.commit()
+            sug_id = cursor.lastrowid
+        except sqlite3.IntegrityError:
+            cursor.execute("SELECT id FROM suggestions WHERE url = ?", (url,))
+            sug_id = cursor.fetchone()[0]
+            
+        saved_highlights.append((sug_id, title, url, source, summary))
+        
+    conn.close()
+    
+    for idx, (sug_id, title, url, source, summary) in enumerate(saved_highlights, 1):
+        markup = types.InlineKeyboardMarkup(row_width=3)
+        btn_yes = types.InlineKeyboardButton("👍 Yes (Accept)", callback_data=f"research_accept:{sug_id}")
+        btn_no = types.InlineKeyboardButton("👎 No (Reject)", callback_data=f"research_reject:{sug_id}")
+        btn_later = types.InlineKeyboardButton("⏳ Later", callback_data=f"research_later:{sug_id}")
+        markup.add(btn_yes, btn_no, btn_later)
+        
+        snippet = summary[:300] + "..." if len(summary) > 300 else summary
+        msg_text = (
+            f"🔥 <b>Highlights Proposing ({idx}/3)</b>\n"
+            f"<b>Title:</b> {html.escape(title or 'Untitled')}\n"
+            f"<b>Source:</b> {source} (Highlight)\n"
+            f"<b>URL:</b> {url}\n\n"
+            f"<b>AI Summary:</b>\n{html.escape(snippet)}\n\n"
+            f"<i>ID: {sug_id}</i>"
+        )
+        try:
+            bot.send_message(CHAT_ID, msg_text, parse_mode="HTML", reply_markup=markup)
+            time.sleep(1)
+        except Exception as te:
+            print(f"⚠️ Failed to send Highlights card for #{sug_id}: {te}")
+
+
+def run_knowledge_incremental_scan():
+    """Scans 03-Knowledge and 05-Learning for recently changed notes and updates summaries."""
+    print("🔍 Running incremental knowledge base scan...")
+    SUMMARIES_PATH = os.path.join(VAULT_ROOT, "07-Tools/Googooli-Knowledge-Summaries.md")
+    LAST_SCAN_PATH = os.path.join(BASE_DIR, "data/last_scan_timestamp.txt")
+    
+    last_scan_time = 0
+    if os.path.exists(LAST_SCAN_PATH):
+        try:
+            with open(LAST_SCAN_PATH, "r") as f:
+                last_scan_time = float(f.read().strip())
+        except Exception:
+            pass
+            
+    if last_scan_time == 0:
+        last_scan_time = time.time() - (7 * 24 * 3600)
+        
+    changed_files = []
+    scan_dirs = [
+        os.path.join(VAULT_ROOT, "03-Knowledge"),
+        os.path.join(VAULT_ROOT, "05-Learning")
+    ]
+    
+    for scan_dir in scan_dirs:
+        if not os.path.exists(scan_dir):
+            continue
+        for root, dirs, files in os.walk(scan_dir):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for file in files:
+                if file.endswith(".md") and not file.startswith("."):
+                    file_path = os.path.join(root, file)
+                    try:
+                        mtime = os.path.getmtime(file_path)
+                        if mtime > last_scan_time:
+                            changed_files.append((file_path, mtime))
+                    except Exception:
+                        continue
+                        
+    if not changed_files:
+        print("✅ No recently changed files found in knowledge base.")
+        try:
+            with open(LAST_SCAN_PATH, "w") as f:
+                f.write(str(time.time()))
+        except Exception:
+            pass
+        return
+
+    print(f"📄 Found {len(changed_files)} recently changed files to process.")
+    
+    batch_size = 5
+    generated_summaries = {}
+    
+    for i in range(0, len(changed_files), batch_size):
+        batch = changed_files[i:i+batch_size]
+        batch_text = []
+        for file_path, mtime in batch:
+            rel_path = os.path.relpath(file_path, VAULT_ROOT)
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read(1500)
+                batch_text.append(f"File: {rel_path}\nContent:\n{content}\n---\n")
+            except Exception as e:
+                print(f"⚠️ Failed to read {file_path}: {e}")
+                
+        if not batch_text:
+            continue
+            
+        preferred_agent = os.getenv("GOOGOOLI_PREFERRED_AGENT", "agy")
+        prompt = f"""You are the Googooli Research Assistant.
+Below are some recently updated notes in Farhad's Obsidian vault.
+For each note, read the content and generate a concise 1-sentence summary of the core concept or research direction.
+The summary MUST be clear, technical, and directly capture what the note is about.
+
+Notes:
+{"".join(batch_text)}
+
+Output MUST be a valid JSON object matching this structure:
+{{
+  "summaries": [
+    {{
+      "file": "path/to/file.md",
+      "summary": "1-sentence summary of core concept"
+    }}
+  ]
+}}
+Do NOT wrap the output in markdown code blocks. Output ONLY raw JSON.
+"""
+        try:
+            res = subprocess.run([preferred_agent, "--print", prompt], capture_output=True, text=True, check=True)
+            output = res.stdout.strip()
+            if output.startswith("```"):
+                output = re.sub(r"^```(?:json)?\n", "", output)
+                output = re.sub(r"\n```$", "", output)
+            
+            data = json.loads(output.strip())
+            for item in data.get("summaries", []):
+                file_rel = item.get("file")
+                summary_val = item.get("summary")
+                if file_rel and summary_val:
+                    generated_summaries[file_rel] = summary_val
+        except Exception as e:
+            print(f"⚠️ Batch summarization failed: {e}")
+            
+    if not generated_summaries:
+        print("⚠️ No summaries were successfully generated.")
+        return
+        
+    summaries_content = ""
+    if os.path.exists(SUMMARIES_PATH):
+        with open(SUMMARIES_PATH, "r", encoding="utf-8") as f:
+            summaries_content = f.read()
+            
+    existing_summaries = {}
+    if summaries_content:
+        matches = re.findall(r"-\s*`([^`]+)`:\s*(.*)", summaries_content)
+        for rel_path, text in matches:
+            existing_summaries[rel_path.strip()] = text.strip()
+            
+    for rel_path, text in generated_summaries.items():
+        existing_summaries[rel_path] = text
+        
+    active_summaries_lines = []
+    for rel_path, text in sorted(existing_summaries.items()):
+        active_summaries_lines.append(f"- `{rel_path}`: {text}")
+        
+    active_summaries_text = "\n".join(active_summaries_lines) if active_summaries_lines else "*No summaries generated yet. Runs automatically during Phase 1.*"
+    
+    today_str = get_netherlands_time().strftime("%Y-%m-%d %H:%M:%S")
+    history_line = f"- **{today_str}**: Scanned {len(changed_files)} files, updated {len(generated_summaries)} summaries."
+    
+    history_lines = []
+    history_match = re.search(r"## 2\. Scan History(.*)", summaries_content, re.DOTALL)
+    if history_match:
+        old_history = history_match.group(1).strip()
+        if old_history and not old_history.startswith("*"):
+            history_lines = [line.strip() for line in old_history.split("\n") if line.strip()][:15]
+            
+    history_lines.insert(0, history_line)
+    history_text = "\n".join(history_lines)
+    
+    new_summaries_content = f"""# 📚 Googooli Knowledge Summaries
+
+This file contains accumulated summaries of recently updated knowledge notes in the vault. The Googooli Research Assistant reads these summaries to generate highly relevant and precise daily search queries.
+
+---
+
+## 1. Active Concept Summaries
+{active_summaries_text}
+
+---
+
+## 2. Scan History
+{history_text}
+"""
+    try:
+        with open(SUMMARIES_PATH, "w", encoding="utf-8") as f:
+            f.write(new_summaries_content)
+        print(f"✅ Updated summaries note at: {SUMMARIES_PATH}")
+    except Exception as e:
+        print(f"⚠️ Failed to write summaries note: {e}")
+        
+    try:
+        with open(LAST_SCAN_PATH, "w") as f:
+            f.write(str(time.time()))
+    except Exception as e:
+        print(f"⚠️ Failed to save scan timestamp: {e}")
+
+
 def phase1_search_loop():
     """Phase 1: 1:00 AM Search Loop."""
     print("🌅 Phase 1: Running 1:00 AM Search Loop...")
+    try:
+        run_knowledge_incremental_scan()
+    except Exception as e:
+        print(f"⚠️ Incremental scan failed: {e}")
+        
     keywords, conferences = parse_interests()
 
-    # Generate 10 search queries dynamically via agy
+
+    # Generate 10 search queries dynamically via preferred agent
     print("🧠 Generating search queries using Googooli agent...")
     interests_content = ""
     if os.path.exists(INTERESTS_PATH):
         with open(INTERESTS_PATH, "r") as f:
             interests_content = f.read()
 
+    summaries_content = ""
+    SUMMARIES_PATH = os.path.join(VAULT_ROOT, "07-Tools/Googooli-Knowledge-Summaries.md")
+    if os.path.exists(SUMMARIES_PATH):
+        with open(SUMMARIES_PATH, "r") as f:
+            summaries_content = f.read()
+
     prompt = f"""You are the Googooli Research Assistant.
 Analyze Farhad's research interests, target fields, and current keywords from this file content:
 {interests_content}
+
+Also take into account the summaries of recently updated vault knowledge notes:
+{summaries_content}
 
 Generate exactly 10 highly specific, advanced, and trending search queries for research papers.
 Requirements:
@@ -780,8 +1220,9 @@ Do NOT wrap the output in markdown code blocks. Output ONLY raw JSON.
 
     general_queries = []
     conference_queries = []
+    preferred_agent = os.getenv("GOOGOOLI_PREFERRED_AGENT", "agy")
     try:
-        res = subprocess.run(["agy", "--print", prompt], capture_output=True, text=True, check=True)
+        res = subprocess.run([preferred_agent, "--print", prompt], capture_output=True, text=True, check=True)
         output = res.stdout.strip()
         if output.startswith("```"):
             output = re.sub(r"^```(?:json)?\n", "", output)
@@ -790,11 +1231,12 @@ Do NOT wrap the output in markdown code blocks. Output ONLY raw JSON.
         data = json.loads(output.strip())
         general_queries = data.get("general", [])
         conference_queries = data.get("conference", [])
-        print(f"✅ Dynamically generated {len(general_queries)} general and {len(conference_queries)} conference queries.")
+        print(f"✅ Dynamically generated {len(general_queries)} general and {len(conference_queries)} conference queries using {preferred_agent}.")
     except Exception as e:
         print(f"⚠️ Query generation failed: {e}. Falling back to default keywords.")
         general_queries = random.sample(keywords, min(7, len(keywords))) if keywords else ["computer vision", "AI", "deep learning"]
         conference_queries = random.sample(keywords, min(3, len(keywords))) if keywords else ["computer vision", "robotics"]
+
 
     # 1. Keyword search (arXiv + PaperCash + last30days + Google Scholar + Social)
     general_candidates = []
@@ -816,42 +1258,83 @@ Do NOT wrap the output in markdown code blocks. Output ONLY raw JSON.
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # 3. Select diverse candidates: 5 general search, 3 from favorite conferences
+    # 3. Select slightly larger candidate pools for NotebookLM filtering
     chosen_urls = set()
-    selected_general = evaluate_candidates(general_candidates, conferences, cursor, limit=5, chosen_urls=chosen_urls)
-    selected_general = [c for c in selected_general if c.get("source") != "Placeholder"]
+    pool_general = evaluate_candidates(general_candidates, conferences, cursor, limit=8, chosen_urls=chosen_urls)
+    pool_general = [c for c in pool_general if c.get("source") != "Placeholder"]
 
-    selected_conference = evaluate_candidates(conference_candidates, conferences, cursor, limit=3, chosen_urls=chosen_urls)
-    selected_conference = [c for c in selected_conference if c.get("source") != "Placeholder"]
+    pool_conference = evaluate_candidates(conference_candidates, conferences, cursor, limit=5, chosen_urls=chosen_urls)
+    pool_conference = [c for c in pool_conference if c.get("source") != "Placeholder"]
 
-    # Fill remaining conference slots with general candidates if needed to guarantee 8 papers
-    needed = 3 - len(selected_conference)
-    if needed > 0:
-        print(f"⚠️ Only found {len(selected_conference)} conference papers. Backfilling {needed} slots with general candidates...")
+    needed = 5 - len(pool_conference)
+    if needed > 0 and general_candidates:
+        print(f"⚠️ Only found {len(pool_conference)} conference papers. Backfilling {needed} slots with general candidates...")
         extra_general = evaluate_candidates(general_candidates, conferences, cursor, limit=needed, chosen_urls=chosen_urls)
         extra_general = [c for c in extra_general if c.get("source") != "Placeholder"]
-        selected_conference.extend(extra_general)
-
-    selected_candidates = selected_general + selected_conference
+        pool_conference.extend(extra_general)
 
     nb_id = get_notebook_id()
     today = get_netherlands_time().strftime("%Y-%m-%d")
+
+    # Evaluate relevance of general pool
+    valid_general = []
+    for idx, c in enumerate(pool_general, 1):
+        title = c.get("title")
+        url = c.get("url")
+        abstract = c.get("abstract") or c.get("snippet") or "No description available."
+        
+        pdf_path = download_arxiv_pdf(url)
+        if not pdf_path and title:
+            pdf_path = download_arxiv_pdf_by_title(title)
+            
+        summary, prereqs, relevance_score = analyze_prerequisites(pdf_path, abstract, title, nb_id)
+        if pdf_path and os.path.exists(pdf_path):
+            os.remove(pdf_path)
+            
+        c["summary"] = summary if (summary and not summary.startswith("Unable")) else abstract
+        c["prereqs"] = prereqs
+        c["relevance_score"] = relevance_score
+        
+        print(f"📋 Evaluated general paper: '{title}' -> Relevance score: {relevance_score}/10")
+        if relevance_score >= 7:
+            valid_general.append(c)
+            
+    selected_general = sorted(valid_general, key=lambda x: x.get("relevance_score", 0), reverse=True)[:5]
+
+    # Evaluate relevance of conference pool
+    valid_conference = []
+    for idx, c in enumerate(pool_conference, 1):
+        title = c.get("title")
+        url = c.get("url")
+        abstract = c.get("abstract") or c.get("snippet") or "No description available."
+        
+        pdf_path = download_arxiv_pdf(url)
+        if not pdf_path and title:
+            pdf_path = download_arxiv_pdf_by_title(title)
+            
+        summary, prereqs, relevance_score = analyze_prerequisites(pdf_path, abstract, title, nb_id)
+        if pdf_path and os.path.exists(pdf_path):
+            os.remove(pdf_path)
+            
+        c["summary"] = summary if (summary and not summary.startswith("Unable")) else abstract
+        c["prereqs"] = prereqs
+        c["relevance_score"] = relevance_score
+        
+        print(f"📋 Evaluated conference paper: '{title}' -> Relevance score: {relevance_score}/10")
+        if relevance_score >= 7:
+            valid_conference.append(c)
+            
+    selected_conference = sorted(valid_conference, key=lambda x: x.get("relevance_score", 0), reverse=True)[:3]
+
+    selected_candidates = selected_general + selected_conference
 
     for idx, c in enumerate(selected_candidates, 1):
         title = c.get("title")
         url = c.get("url")
         source = c.get("source", "Web")
-        metric = c.get("metric", "General")
-        abstract = c.get("abstract") or c.get("snippet") or "No description available."
-
-        pdf_path = download_arxiv_pdf(url)
-        if not pdf_path and title:
-            pdf_path = download_arxiv_pdf_by_title(title)
-        summary, prereqs = analyze_prerequisites(pdf_path, nb_id)
-        if not summary or not isinstance(summary, str) or summary.startswith("Unable"):
-            summary = abstract
-        if not summary:
-            summary = "No description available."
+        metric = f"{c.get('metric', 'General')} - Relevance: {c.get('relevance_score', 0)}/10"
+        summary = c.get("summary")
+        prereqs = c.get("prereqs", [])
 
         prereq_status = []
         for pr in prereqs:
@@ -863,9 +1346,6 @@ Do NOT wrap the output in markdown code blocks. Output ONLY raw JSON.
 
         prereq_text = "\n".join(prereq_status) if prereq_status else "• None identified"
 
-        if pdf_path and os.path.exists(pdf_path):
-            os.remove(pdf_path)
-
         try:
             cursor.execute("""
             INSERT INTO suggestions (title, url, source, description, prerequisites, metric, created_date)
@@ -876,6 +1356,7 @@ Do NOT wrap the output in markdown code blocks. Output ONLY raw JSON.
         except sqlite3.IntegrityError:
             cursor.execute("SELECT id FROM suggestions WHERE url = ?", (url,))
             sug_id = cursor.fetchone()[0]
+
 
         # Inline Accept/Reject/Later buttons
         markup = types.InlineKeyboardMarkup(row_width=3)
@@ -950,6 +1431,11 @@ Do NOT wrap the output in markdown code blocks. Output ONLY raw JSON.
                 print(f"⚠️ Failed to send Telegram card for Later item #{s_id}: {te}")
     except Exception as dbe:
         print(f"⚠️ Failed to query Later items from DB: {dbe}")
+
+    try:
+        run_daily_highlights(keywords, conferences)
+    except Exception as he:
+        print(f"⚠️ Highlights generation failed: {he}")
 
     conn.close()
     print("✅ Phase 1 complete. Suggestions sent.")
@@ -1185,11 +1671,12 @@ def phase2_ingestion_loop():
                 tav_client = TavilyClient(api_key=tav_key)
                 
                 # Prerequisite blogs / context
-                search_res = tav_client.search(f"{title} explanation tutorial background", max_results=3)
+                query_context = f"{title} {user_notes if user_notes else ''}"
+                search_res = tav_client.search(f"{query_context} explanation tutorial background", max_results=3)
                 context_data = "\n".join([r.get("content", "") for r in search_res.get("results", [])])
                 
                 # Related papers (papers citing or built on it)
-                related_res = tav_client.search(f"papers citing or building on '{title}'", max_results=3)
+                related_res = tav_client.search(f"papers citing or building on '{title}' {user_notes if user_notes else ''}", max_results=3)
                 related_papers = []
                 for r in related_res.get("results", []):
                     # MDPI Filter
@@ -1322,7 +1809,9 @@ def phase2_ingestion_loop():
 
         # Single Unified Synthesis Query to NotebookLM
         report_text = ""
+        qa_report_text = ""
         mind_map_mermaid = ""
+        tags_text = ""
 
         if paper_nb_id:
             try:
@@ -1342,7 +1831,77 @@ Structure the report using clean markdown headers:
 
                 report_text = run_notebooklm_ask(unified_prompt, paper_nb_id, resolve_references=True, use_personality=True)
 
-                # 2. Generate native mind-map
+                # 2. Interactive/Recursive Q&A Loop
+                preferred_agent = os.getenv("GOOGOOLI_PREFERRED_AGENT", "agy")
+                base_questions = [
+                    ("Concepts", "Explain the core concepts and theoretical background of this paper."),
+                    ("Method", "Explain the proposed method, key formulations, algorithms, and structural designs in detail."),
+                    ("Innovation", "What are the key technical innovations and contributions compared to prior work?"),
+                    ("Usecases", "List the practical applications and scenarios where this method is highly applicable."),
+                    ("Limitations", "What are the limitations, drawbacks, assumptions, or failure cases of this method?"),
+                    ("Project Alignment", f"How does this method align with Farhad's research interests and active projects? How can it be integrated or used? User notes: {user_notes if user_notes else 'None'}")
+                ]
+                
+                qa_history = []
+                for category, base_q in base_questions:
+                    print(f"💬 Asking NotebookLM base question ({category})...")
+                    current_q = base_q
+                    turn_history = []
+                    
+                    for depth in range(3):  # up to 3 turns (base + 2 follow-ups)
+                        ans = run_notebooklm_ask(current_q, paper_nb_id, resolve_references=True, use_personality=True)
+                        if not ans:
+                            ans = "Unable to retrieve answer."
+                        turn_history.append((current_q, ans))
+                        
+                        if depth == 2 or ans == "Unable to retrieve answer.":
+                            break
+                            
+                        # Let agent analyze response and propose follow-up
+                        analysis_prompt = f"""You are the Googooli Research Assistant.
+Farhad is studying a research paper. We asked NotebookLM this question:
+"{current_q}"
+
+NotebookLM gave this answer:
+"{ans}"
+
+We want to dig deeper. Analyze the answer and identify one specific technical concept, unresolved detail, or limitation mentioned in the answer that needs clarification or deep dive.
+Generate exactly one follow-up question to ask NotebookLM.
+Requirements:
+1. The follow-up question must be highly specific, technical, and directly reference the text in the answer.
+2. If the answer is completely clear and there are no new technical terms or gaps, output "COMPLETE" to signal that we have finished this line of inquiry.
+3. Output ONLY the follow-up question or "COMPLETE". Do not wrap the output in markdown. Do NOT add conversational prefix.
+"""
+                        try:
+                            res_fol = subprocess.run([preferred_agent, "--print", analysis_prompt], capture_output=True, text=True, check=True)
+                            follow_up = res_fol.stdout.strip()
+                            if follow_up.startswith("```"):
+                                follow_up = re.sub(r"^```(?:json)?\n", "", follow_up)
+                                follow_up = re.sub(r"\n```$", "", follow_up)
+                            follow_up = follow_up.strip()
+                            
+                            if not follow_up or "COMPLETE" in follow_up.upper():
+                                print("✅ Line of inquiry complete.")
+                                break
+                                
+                            print(f"🔄 Follow-up question generated: {follow_up}")
+                            current_q = follow_up
+                        except Exception as e:
+                            print(f"⚠️ Failed to generate follow-up: {e}")
+                            break
+                            
+                    qa_history.append((category, turn_history))
+                    
+                qa_text_blocks = []
+                for category, turns in qa_history:
+                    qa_text_blocks.append(f"### {category}")
+                    for q_idx, (q_text, a_text) in enumerate(turns, 1):
+                        qa_text_blocks.append(f"**Q{q_idx}:** {q_text}\n")
+                        qa_text_blocks.append(f"**A{q_idx}:**\n{a_text}\n")
+                    qa_text_blocks.append("---")
+                qa_report_text = "\n".join(qa_text_blocks)
+
+                # 3. Generate native mind-map
                 subprocess.run(["notebooklm", "generate", "mind-map", "--notebook", paper_nb_id], capture_output=True)
                 mm_path = os.path.join(TEMP_DIR, f"mind_map_{paper_nb_id}.json")
                 subprocess.run(["notebooklm", "download", "mind-map", mm_path, "--notebook", paper_nb_id, "--force"], capture_output=True)
@@ -1350,8 +1909,25 @@ Structure the report using clean markdown headers:
                     mind_map_mermaid = convert_json_mind_map_to_mermaid(mm_path)
                     os.remove(mm_path)
 
+                # 4. Generate Obsidian hashtags
+                tags_prompt = f"""You are the Googooli Research Assistant.
+Based on the paper title: "{title}" and description: "{description}", generate 5-7 highly relevant Obsidian hashtags.
+Requirements:
+1. Use camelCase or kebab-case (e.g. #visualAnomalyDetection or #computer-vision).
+2. Output ONLY the tags space-separated on a single line. Do not write markdown or conversational prefix.
+"""
+                try:
+                    res_tags = subprocess.run([preferred_agent, "--print", tags_prompt], capture_output=True, text=True, check=True)
+                    tags_text = res_tags.stdout.strip()
+                    if tags_text.startswith("```"):
+                        tags_text = re.sub(r"^```(?:json)?\n", "", tags_text)
+                        tags_text = re.sub(r"\n```$", "", tags_text)
+                    tags_text = tags_text.strip()
+                except Exception as e:
+                    tags_text = "#research #paper"
+
             except Exception as e:
-                print(f"⚠️ NotebookLM Q&A or mind map generation failed: {e}")
+                print(f"⚠️ NotebookLM Q&A, recursive loop, or mind map generation failed: {e}")
 
         if pdf_path and os.path.exists(pdf_path):
             os.remove(pdf_path)
@@ -1430,8 +2006,17 @@ Structure the report using clean markdown headers:
 
 ---
 
+## 💬 Interactive Deep-Dive (Q&A)
+{qa_report_text if qa_report_text else "Q&A session failed."}
+
+---
+
 ## 🗺️ NotebookLM Mind Map
 {mind_map_mermaid if mind_map_mermaid else "Mind map generation failed."}
+
+---
+
+{tags_text}
 """
 
         with open(note_path, "w", encoding="utf-8") as f:
@@ -1526,13 +2111,12 @@ def run_weekly_autotuning():
     btn_no = types.InlineKeyboardButton("❌ Reject Update", callback_data=f"interests_reject:{changes_id}")
     markup.add(btn_yes, btn_no)
 
-    interests_file_path = os.path.join(VAULT_ROOT, "07-Tools/Googooli-Research-Interests.md")
     msg_text = (
         f"<b>📊 Weekly Interests Autotuning Proposal</b>\n\n"
         f"Based on last week's selections, I propose updating your keywords:\n\n"
         f"➕ <b>Add Keywords:</b> {add_text}\n"
         f"➖ <b>Remove Keywords:</b> {remove_text}\n\n"
-        f"Approve to update <a href='file://{interests_file_path}'>Googooli-Research-Interests.md</a>."
+        f"Approve to update <a href='file:///home/mamdaliof/Documents/GitHub/mamdaliof-obsidian/07-Tools/Googooli-Research-Interests.md'>Googooli-Research-Interests.md</a>."
     )
 
     try:
@@ -1542,14 +2126,15 @@ def run_weekly_autotuning():
         print(f"⚠️ Failed to send weekly Telegram proposal: {te}")
 
 
-def run_project_research(project_name):
-    """Phase 4: Project-focused Deep Research."""
+def run_project_research(project_name, user_feedback=None):
+    """Phase 4: Project-focused Deep Research (Interactive, Phased)."""
     print(f"🌅 Running Project-focused Deep Research for: {project_name}")
     proj_path = None
     for folder in os.listdir(os.path.join(VAULT_ROOT, "02-Projects")):
         if folder != "meetings" and os.path.isdir(os.path.join(VAULT_ROOT, "02-Projects", folder)):
-            if project_name.lower() in folder.lower():
+            if project_name.lower() in folder.lower() or folder.lower() in project_name.lower():
                 proj_path = os.path.join(VAULT_ROOT, "02-Projects", folder)
+                project_name = folder
                 break
 
     if not proj_path:
@@ -1558,106 +2143,344 @@ def run_project_research(project_name):
         print(msg)
         return
 
-    bot.send_message(CHAT_ID, f"🔍 <b>Project Research Started</b>\nScanning READMEs and TODOs inside: <i>{html.escape(os.path.basename(proj_path))}</i>...", parse_mode="HTML")
+    # Check/create research_brief.md
+    brief_path = os.path.join(proj_path, "research_brief.md")
+    if not os.path.exists(brief_path):
+        default_brief = f"""# Project Research Brief: {project_name}
 
-    project_context = ""
-    for root, dirs, files in os.walk(proj_path):
-        for file in files:
-            if file.endswith((".md", ".txt")):
-                try:
-                    with open(os.path.join(root, file), "r", encoding="utf-8") as f:
-                        text = f.read()
-                        if "todo" in text.lower() or "challenge" in text.lower() or "readme" in file.lower():
-                            project_context += f"\nFile {file}:\n{text[:1000]}"
-                except:
-                    continue
+## Phase 1: Problem Definition & Key Questions
+- **Topics**: SLAM, visual odometry
+- **Instructions**: Search for visual-inertial SLAM methods resilient to low-texture environments.
+- **Questions**:
+  - What are the state-of-the-art visual-inertial odometry methods?
+  - How do they handle texture-less corridor environments?
 
-    prompt = (
-        f"Analyze this project context and generate 2 search queries to find academic papers/repos that can help resolve the tasks/challenges:\n\n"
-        f"{project_context[:3000]}\n\n"
-        f"Return queries as a simple list of 2 strings separated by a newline."
-    )
-
-    keywords = [os.path.basename(proj_path)]
-    try:
-        res = subprocess.run(["agy", "--print", prompt], capture_output=True, text=True, check=True)
-        keywords = [line.strip().replace('"', "") for line in res.stdout.split("\n") if line.strip()][:2]
-    except Exception as e:
-        print(f"⚠️ Query generation failed: {e}")
-
-    all_raw_candidates = []
-    for kw in keywords:
-        print(f"🔍 Searching solutions for: {kw}")
-        all_raw_candidates.extend(run_papercash_search(kw))
-        all_raw_candidates.extend(run_last30days_search(kw))
-
-    if not all_raw_candidates:
-        bot.send_message(CHAT_ID, f"⚠️ No matches found on web for: {keywords}")
+## Phase 2: Navigation & Control
+- **Topics**: path planning, MPC
+- **Instructions**: Focus on MPC-based trajectory tracking for differential drive robots.
+- **Questions**:
+  - What MPC frameworks are best suited for real-time collision avoidance?
+"""
+        with open(brief_path, "w", encoding="utf-8") as f:
+            f.write(default_brief)
+        bot.send_message(CHAT_ID, f"📝 Created default <code>research_brief.md</code> for: <b>{project_name}</b>. Please edit this file to configure your research phases, then reply/proceed to resume.", parse_mode="HTML")
         return
 
-    top_candidates = sorted(all_raw_candidates, key=lambda x: x.get("final_score", 0.0), reverse=True)[:3]
-    paper_nb_id = get_notebook_id(title=f"ProjectResearch-{os.path.basename(proj_path)}")
+    # Parse brief
+    try:
+        with open(brief_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        bot.send_message(CHAT_ID, f"❌ Failed to read research brief: {e}")
+        return
 
-    if project_context:
+    sections = re.split(r"##\s*Phase\s*\d+:\s*", content)[1:]
+    phases = []
+    for idx, sec in enumerate(sections, 1):
+        lines = sec.strip().split("\n")
+        title = lines[0].strip()
+        topics = ""
+        instructions = ""
+        questions = []
+        
+        mode = None
+        for line in lines[1:]:
+            line_strip = line.strip()
+            if line_strip.startswith("- **Topics**:") or line_strip.startswith("**Topics**:"):
+                topics = line_strip.split(":", 1)[1].strip()
+            elif line_strip.startswith("- **Instructions**:") or line_strip.startswith("**Instructions**:"):
+                instructions = line_strip.split(":", 1)[1].strip()
+            elif line_strip.startswith("- **Questions**:") or line_strip.startswith("**Questions**:"):
+                mode = "questions"
+            elif mode == "questions" and line_strip.startswith("-"):
+                questions.append(re.sub(r"^-\s*", "", line_strip))
+                
+        phases.append({
+            "index": idx,
+            "title": title,
+            "topics": topics,
+            "instructions": instructions,
+            "questions": questions
+        })
+
+    if not phases:
+        bot.send_message(CHAT_ID, f"❌ No phases found in <code>research_brief.md</code> for <b>{project_name}</b>.", parse_mode="HTML")
+        return
+
+    # Load state from database
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT current_phase, total_phases, phases_json, status FROM guided_research WHERE project_name = ?", (project_name,))
+    row = cursor.fetchone()
+
+    phase_idx = 1
+    if row:
+        current_phase_db, total_phases_db, phases_json_db, status_db = row
+        if status_db == 'waiting_feedback':
+            if user_feedback:
+                # User provided feedback/comment, record it and advance to the next phase
+                phase_idx = current_phase_db + 1
+                if phase_idx > len(phases):
+                    cursor.execute("UPDATE guided_research SET status = 'completed', updated_date = ? WHERE project_name = ?", (time.strftime("%Y-%m-%d"), project_name))
+                    conn.commit()
+                    conn.close()
+                    bot.send_message(CHAT_ID, f"🎉 <b>Guided Project Research Completed</b> for: <b>{project_name}</b>!", parse_mode="HTML")
+                    return
+                cursor.execute("UPDATE guided_research SET current_phase = ?, status = 'running', updated_date = ? WHERE project_name = ?", (phase_idx, time.strftime("%Y-%m-%d"), project_name))
+                conn.commit()
+            else:
+                # Waiting for feedback, no resume trigger yet
+                conn.close()
+                bot.send_message(CHAT_ID, f"⏳ Guided research for <b>{project_name}</b> is waiting for user feedback on the previous phase. Reply or click Proceed to resume.", parse_mode="HTML")
+                return
+        elif status_db == 'completed':
+            bot.send_message(CHAT_ID, f"✅ Guided research for <b>{project_name}</b> is already completed. To rerun, please delete/reset project state in SQLite.", parse_mode="HTML")
+            conn.close()
+            return
+        else: # running
+            phase_idx = current_phase_db
+    else:
+        # First execution setup
+        cursor.execute("""
+        INSERT OR REPLACE INTO guided_research (project_name, current_phase, total_phases, phases_json, status, updated_date)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (project_name, 1, len(phases), json.dumps(phases), "running", time.strftime("%Y-%m-%d")))
+        conn.commit()
+        phase_idx = 1
+
+    current_phase = phases[phase_idx - 1]
+    phase_title = current_phase.get("title")
+    phase_topics = current_phase.get("topics")
+    phase_instructions = current_phase.get("instructions")
+    phase_questions = current_phase.get("questions")
+
+    bot.send_message(CHAT_ID, f"🚀 <b>Starting Guided Phase {phase_idx}/{len(phases)}</b> for <b>{project_name}</b>:\n<i>{phase_title}</i>...", parse_mode="HTML")
+
+    # Read previous summaries from research_log.md if exists
+    log_path = os.path.join(proj_path, "research_log.md")
+    prev_summaries = ""
+    if os.path.exists(log_path):
         try:
-            subprocess.run(["notebooklm", "source", "add", project_context[:5000], "--notebook", paper_nb_id, "--type", "text", "--title", "Project Context", "--json"], capture_output=True)
-        except Exception as e:
-            print(f"⚠️ Context upload failed: {e}")
+            with open(log_path, "r", encoding="utf-8") as f:
+                prev_summaries = f.read()
+        except:
+            pass
+
+    # 1. Generate search queries targeting phase
+    preferred_agent = os.getenv("GOOGOOLI_PREFERRED_AGENT", "agy")
+    prompt = f"""You are the Googooli Research Assistant.
+Farhad is doing guided research on project: "{project_name}".
+We are executing Phase {phase_idx}: "{phase_title}".
+Phase Instructions: {phase_instructions}
+Phase Topics: {phase_topics}
+
+Below are summaries of research done in previous phases:
+{prev_summaries[:1500] if prev_summaries else "No previous phases completed."}
+
+Generate exactly 3 highly specific search queries to find the most SOTA relevant papers on arXiv, Google Scholar, or code repositories on GitHub.
+Requirements:
+1. Do NOT duplicate previous research or generate generic queries.
+2. The queries must be highly technical and directly target the instructions and topics of this phase.
+3. Output MUST be a valid JSON object matching this structure:
+{{
+  "queries": [
+    "query 1",
+    "query 2",
+    "query 3"
+  ]
+}}
+Do NOT wrap the output in markdown code blocks. Output ONLY raw JSON.
+"""
+
+    search_queries = []
+    try:
+        res = subprocess.run([preferred_agent, "--print", prompt], capture_output=True, text=True, check=True)
+        output = res.stdout.strip()
+        if output.startswith("```"):
+            output = re.sub(r"^```(?:json)?\n", "", output)
+            output = re.sub(r"\n```$", "", output)
+        
+        data = json.loads(output.strip())
+        search_queries = data.get("queries", [])
+        print(f"✅ Guided queries: {search_queries}")
+    except Exception as e:
+        print(f"⚠️ Query generation failed: {e}")
+        search_queries = [f"{phase_topics} {project_name}", f"{phase_title}"]
+
+    # 2. Run deep search
+    all_raw_candidates = []
+    for q in search_queries:
+        print(f"🔍 Deep searching: {q}")
+        all_raw_candidates.extend(run_papercash_search(q))
+        all_raw_candidates.extend(run_last30days_search(q))
+        all_raw_candidates.extend(run_google_scholar_search(q))
+
+    # Evaluate/select top 3 papers
+    chosen_urls = set()
+    top_candidates = evaluate_candidates(all_raw_candidates, [], cursor, limit=3, chosen_urls=chosen_urls)
+    top_candidates = [c for c in top_candidates if c.get("source") != "Placeholder"]
+
+    if not top_candidates:
+        bot.send_message(CHAT_ID, f"⚠️ No matches found on web for: {search_queries}")
+        conn.close()
+        return
+
+    candidate_titles = "\n".join([f"- {c.get('title')} ({c.get('url')})" for c in top_candidates])
+
+    # 3. Gap detection
+    gap_prompt = f"""You are the Googooli Research Assistant.
+Farhad's research brief for this phase is:
+Topics: {phase_topics}
+Instructions: {phase_instructions}
+
+We found the following papers during our search:
+{candidate_titles}
+
+Compare the paper topics with the brief. Identify if there are any highly relevant, critical aspects, limitations, or alternative methods (e.g. a specific SLAM technique, a new sensor combination, or a critical drawback) mentioned in these papers that were neglected in the brief but are essential for Farhad's project.
+Output a list of 1-3 gap recommendations, or "NONE" if the search perfectly matches the brief.
+Format:
+- [Gap 1]
+- [Gap 2]
+Output ONLY the gaps or "NONE".
+"""
+    gaps_text = ""
+    try:
+        res_gap = subprocess.run([preferred_agent, "--print", gap_prompt], capture_output=True, text=True, check=True)
+        gaps_text = res_gap.stdout.strip()
+        if gaps_text.startswith("```"):
+            gaps_text = re.sub(r"^```(?:json)?\n", "", gaps_text)
+            gaps_text = re.sub(r"\n```$", "", gaps_text)
+        gaps_text = gaps_text.strip()
+    except Exception as e:
+        print(f"⚠️ Gap detection failed: {e}")
+        gaps_text = "NONE"
+
+    # Send Gap card to Telegram if valid
+    if gaps_text and "NONE" not in gaps_text.upper():
+        gap_msg = f"💡 <b>Identified Gaps for Guided Project: {project_name}</b>\n\nSearch revealed topics/limitations not in your brief:\n{gaps_text}"
+        bot.send_message(CHAT_ID, gap_msg, parse_mode="HTML")
+
+    # 4. Upload to project NotebookLM
+    clean_proj_name = re.sub(r'[^\w\s-]', '', project_name).strip()[:50].strip()
+    proj_nb_id = get_notebook_id(title=f"ProjectResearch-{clean_proj_name}")
 
     for c in top_candidates:
         pdf_path = download_arxiv_pdf(c.get("url"))
         if not pdf_path and c.get("title"):
             pdf_path = download_arxiv_pdf_by_title(c.get("title"))
-        if pdf_path and paper_nb_id:
+        if pdf_path and proj_nb_id:
             try:
-                res_add = subprocess.run(["notebooklm", "source", "add", pdf_path, "--notebook", paper_nb_id, "--type", "file", "--json"], capture_output=True, text=True)
+                res_add = subprocess.run(["notebooklm", "source", "add", pdf_path, "--notebook", proj_nb_id, "--type", "file", "--json"], capture_output=True, text=True)
                 src_id = json.loads(res_add.stdout).get("id") or json.loads(res_add.stdout).get("source", {}).get("id")
                 if src_id:
-                    subprocess.run(["notebooklm", "source", "wait", src_id, "--notebook", paper_nb_id, "--timeout", "300"], capture_output=True)
+                    subprocess.run(["notebooklm", "source", "wait", src_id, "--notebook", proj_nb_id, "--timeout", "300"], capture_output=True)
             except Exception as e:
                 print(f"⚠️ Paper upload failed: {e}")
             if os.path.exists(pdf_path):
                 os.remove(pdf_path)
 
-    solutions = ""
-    if paper_nb_id:
-        try:
-            solutions = run_notebooklm_ask("Based on the project files and downloaded papers, draft concrete solutions, architecture proposals, and code examples addressing the challenges/todos. Do NOT use numerical citations like [1] or [2].", paper_nb_id)
-        except Exception as e:
-            print(f"⚠️ Q&A failed: {e}")
+    # 5. Interactive Q&A for Phase Questions
+    qa_turns = []
+    for q_idx, question in enumerate(phase_questions, 1):
+        print(f"💬 Querying question {q_idx}/{len(phase_questions)}: {question}")
+        current_q = question
+        turns = []
+        for depth in range(3):
+            ans = run_notebooklm_ask(current_q, proj_nb_id, resolve_references=True)
+            if not ans:
+                ans = "Unable to retrieve answer."
+            turns.append((current_q, ans))
+            
+            if depth == 2 or ans == "Unable to retrieve answer.":
+                break
+                
+            # Propose follow-up query
+            analysis_prompt = f"""You are the Googooli Research Assistant.
+We are investigating a guided research project. We asked:
+"{current_q}"
 
-    report_path = os.path.join(proj_path, "Research-Report.md")
-    report_content = f"""# Research & Development Report: {os.path.basename(proj_path)}
+NotebookLM answered:
+"{ans}"
 
+Generate exactly one technical follow-up question to clarify gaps or unresolved details. If none, output "COMPLETE".
+Output ONLY the follow-up question or "COMPLETE". Do not wrap in markdown or add conversational prefix.
+"""
+            try:
+                res_fol = subprocess.run([preferred_agent, "--print", analysis_prompt], capture_output=True, text=True, check=True)
+                follow_up = res_fol.stdout.strip()
+                if follow_up.startswith("```"):
+                    follow_up = re.sub(r"^```(?:json)?\n", "", follow_up)
+                    follow_up = re.sub(r"\n```$", "", follow_up)
+                follow_up = follow_up.strip()
+                if not follow_up or "COMPLETE" in follow_up.upper():
+                    break
+                current_q = follow_up
+            except Exception as e:
+                print(f"⚠️ Follow-up question generation failed: {e}")
+                break
+        qa_turns.append(turns)
+
+    # Compile log content
+    qas_compiled = []
+    for q_idx, turns in enumerate(qa_turns, 1):
+        qas_compiled.append(f"#### Question {q_idx}: {phase_questions[q_idx-1]}")
+        for turn_idx, (q, a) in enumerate(turns, 1):
+            qas_compiled.append(f"**Q{turn_idx}:** {q}\n")
+            qas_compiled.append(f"**A{turn_idx}:**\n{a}\n")
+        qas_compiled.append("---")
+
+    qas_text = "\n".join(qas_compiled)
+
+    new_log_section = f"""
+---
+
+## Phase {phase_idx}: {phase_title}
 **Date:** {time.strftime("%Y-%m-%d")}
-**Search Queries:** {", ".join(keywords)}
+**Topics:** {phase_topics}
+**Status:** Completed
 
----
+### 🔎 References Found
+{candidate_titles}
 
-## 🔎 References & Literature Found
-"""
-    for c in top_candidates:
-        report_content += f"- [{c.get('title')}]({c.get('url')}) ({c.get('source')})\n"
+### 💬 NotebookLM Q&A
+{qas_text}
 
-    report_content += f"""
----
-
-## 🛠️ Solutions, Architecture & Implementations
-{solutions if solutions else "Q&A failed or timed out."}
+### 💡 Identified Gaps & Recommendations
+{gaps_text if gaps_text else "None"}
 """
 
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(report_content)
+    if not os.path.exists(log_path):
+        initial_log = f"""# 📑 Research Log: {project_name}
 
-    clean_proj_name = html.escape(os.path.basename(proj_path))
-    msg = (
-        f"🔬 <b>Research Report Ready</b>\n"
-        f"Saved research report to <i>{clean_proj_name}/Research-Report.md</i>.\n\n"
-        f"You can query the report directly here on Telegram:\n"
-        f"• 📝 Get brief summary: <code>/get_report_summary {os.path.basename(proj_path)}</code>\n"
-        f"• 📖 Get full report context: <code>/get_report_full {os.path.basename(proj_path)}</code>"
+This log records the progress, literature study guides, and Q&A findings for each phase of the guided project research.
+"""
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(initial_log)
+
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(new_log_section)
+        print(f"✅ Appended phase research findings to {log_path}")
+    except Exception as e:
+        print(f"⚠️ Failed to write to project research log: {e}")
+
+    # Set status = 'waiting_feedback'
+    cursor.execute("UPDATE guided_research SET status = 'waiting_feedback', updated_date = ? WHERE project_name = ?", (time.strftime("%Y-%m-%d"), project_name))
+    conn.commit()
+    conn.close()
+
+    # Send Phase Completion Notification with Proceed / Pause buttons
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_proceed = types.InlineKeyboardButton("👍 Proceed to Next Phase", callback_data=f"guided_proceed:{project_name}")
+    btn_pause = types.InlineKeyboardButton("⏸️ Pause", callback_data=f"guided_pause:{project_name}")
+    markup.add(btn_proceed, btn_pause)
+
+    msg_finished = (
+        f"🔬 <b>Guided Phase {phase_idx} Completed</b> for project <b>{project_name}</b>!\n"
+        f"Saved findings to <code>{project_name}/research_log.md</code>.\n\n"
+        f"Reply to this message with your comments/instructions to guide the next phase, or use the buttons below."
     )
-    bot.send_message(CHAT_ID, msg, parse_mode="HTML")
+    bot.send_message(CHAT_ID, msg_finished, parse_mode="HTML", reply_markup=markup)
 
 
 def main():

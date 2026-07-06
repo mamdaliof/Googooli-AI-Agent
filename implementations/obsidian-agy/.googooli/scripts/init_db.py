@@ -62,6 +62,19 @@ def main():
     )
     """)
 
+    # 5. Guided project research state table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS guided_research (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_name TEXT UNIQUE NOT NULL,
+        current_phase INTEGER DEFAULT 0,
+        total_phases INTEGER DEFAULT 0,
+        phases_json TEXT NOT NULL, -- JSON list of phase definitions: [{"title": "Phase 1...", "description": "..."}]
+        status TEXT DEFAULT 'idle', -- 'idle', 'running', 'waiting_feedback', 'completed'
+        updated_date TEXT NOT NULL
+    )
+    """)
+
     # Run migration to add user_notes column if not exists
     try:
         cursor.execute("ALTER TABLE suggestions ADD COLUMN user_notes TEXT")
