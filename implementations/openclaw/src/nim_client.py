@@ -9,7 +9,7 @@ class NIMClient:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
-        self.timeout = 15.0
+        self.timeout = 60.0
 
     def chat_completion(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, temperature: float = 0.7, max_tokens: int = 1024) -> Dict[str, Any]:
         headers = {
